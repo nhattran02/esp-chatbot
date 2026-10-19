@@ -92,7 +92,29 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
         owns_models_ = models_ != nullptr;
 #ifdef CONFIG_CUSTOM_WAKE_WORD
         threshold_ = CONFIG_CUSTOM_WAKE_WORD_THRESHOLD / 100.0f;
-        commands_.push_back({CONFIG_CUSTOM_WAKE_WORD, CONFIG_CUSTOM_WAKE_WORD_DISPLAY, "wake"});
+        // Several phrases may share the setting, separated by ';' ("hello;hi")
+        auto split = [](const std::string& text) {
+            std::vector<std::string> items;
+            size_t start = 0;
+            while (start <= text.size()) {
+                size_t end = text.find(';', start);
+                if (end == std::string::npos) {
+                    end = text.size();
+                }
+                if (end > start) {
+                    items.push_back(text.substr(start, end - start));
+                }
+                start = end + 1;
+            }
+            return items;
+        };
+        auto phrases = split(CONFIG_CUSTOM_WAKE_WORD);
+        auto displays = split(CONFIG_CUSTOM_WAKE_WORD_DISPLAY);
+        for (size_t i = 0; i < phrases.size(); i++) {
+            const std::string& display =
+                displays.size() == phrases.size() ? displays[i] : CONFIG_CUSTOM_WAKE_WORD_DISPLAY;
+            commands_.push_back({phrases[i], display, "wake"});
+        }
 #endif
     } else {
         models_ = models_list;

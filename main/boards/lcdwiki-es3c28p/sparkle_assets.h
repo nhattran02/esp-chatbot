@@ -25,6 +25,9 @@ extern const lv_image_dsc_t sparkle_glow_bloom;
 extern const lv_image_dsc_t sparkle_ring_dashed;
 extern const lv_image_dsc_t sparkle_star_16;
 extern const lv_image_dsc_t sparkle_star_glow_16;
+extern const lv_image_dsc_t sparkle_heart_24;
+extern const lv_image_dsc_t sparkle_drop_10;
+extern const lv_image_dsc_t sparkle_spiral_24;
 
 #ifdef __cplusplus
 }

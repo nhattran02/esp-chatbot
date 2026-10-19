@@ -3,14 +3,21 @@
 
 #include "device_state.h"
 #include "display/lcd_display.h"
+#include "sparkle_face.h"
 
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
 // "Sparkle Bot" UI for the 320x240 landscape panel (see the board README).
 // One page per device state: idle clock, listening, thinking, speaking and
 // Wi-Fi setup. Pages are built once; only the active page animates.
+//
+// With a touch panel the bot is interactive: tapping it plays an expression,
+// holding it pets it, tapping anywhere else starts or stops a conversation
+// and holding elsewhere for 3 s enters Wi-Fi setup.
 class SparkleDisplay : public LcdDisplay {
 public:
     SparkleDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel, int width,
@@ -26,18 +33,10 @@ public:
     virtual void SetTheme(Theme* theme) override;
     virtual void UpdateStatusBar(bool update_all = false) override;
 
+    // Called from the LVGL task; keep them short or schedule the work
+    void EnableTouch(std::function<void()> on_tap, std::function<void()> on_hold);
+
     // Animation targets that need more than one object
-    struct Eye {
-        lv_obj_t* body = nullptr;
-        lv_obj_t* glow = nullptr;
-        lv_obj_t* shine = nullptr;
-        int32_t center_y = 0;
-        int32_t height = 0;
-        int32_t last_height = -1;
-    };
-    struct Blink {
-        Eye eyes[2];
-    };
     struct Orbit {
         lv_obj_t* items[3] = {};
         int16_t angles[3] = {};
@@ -60,7 +59,9 @@ private:
     lv_obj_t* pages_[kPageCount] = {};
     Page page_ = kPageNone;
     lv_timer_t* tick_timer_ = nullptr;
+    lv_timer_t* frame_timer_ = nullptr;
     std::vector<void*> anim_vars_;
+    lv_obj_t* fade_ = nullptr;
 
     // Top bar
     lv_obj_t* bar_star_ = nullptr;
@@ -77,15 +78,17 @@ private:
     lv_obj_t* date_label_ = nullptr;
     lv_obj_t* info_label_ = nullptr;
     lv_obj_t* hint_label_ = nullptr;
-    Blink idle_blink_;
+    std::unique_ptr<SparkleFace> idle_bot_;
 
     // Listening
+    lv_obj_t* listen_head_ = nullptr;
     lv_obj_t* rings_[2] = {};
     lv_obj_t* listen_bars_[9] = {};
     lv_obj_t* transcript_label_ = nullptr;
     lv_obj_t* caret_ = nullptr;
 
     // Thinking
+    lv_obj_t* think_head_ = nullptr;
     Orbit stars_orbit_;
     Orbit dots_orbit_;
     Look look_;
@@ -95,9 +98,9 @@ private:
 
     // Speaking
     lv_obj_t* speak_face_ = nullptr;
-    lv_obj_t* mouth_ = nullptr;
     lv_obj_t* speak_bars_[5] = {};
     lv_obj_t* chat_list_ = nullptr;
+    std::unique_ptr<SparkleFace> speak_bot_;
 
     // Wi-Fi setup
     lv_obj_t* spinner_[2] = {};
@@ -109,6 +112,29 @@ private:
     // Twinkling stars per page
     std::vector<lv_obj_t*> twinkles_[kPageCount];
     std::vector<uint32_t> twinkle_timing_[kPageCount];
+
+    // Touch: the bot's hit area per page, press tracking and feedback
+    bool touch_enabled_ = false;
+    std::function<void()> on_tap_;
+    std::function<void()> on_hold_;
+    lv_obj_t* bot_hit_[kPageCount] = {};
+    lv_obj_t* ripples_[3] = {};
+    int next_ripple_ = 0;
+    lv_obj_t* hold_track_ = nullptr;
+    lv_obj_t* hold_arc_ = nullptr;
+    lv_point_t press_point_ = {};
+    uint32_t press_ms_ = 0;
+    bool press_on_bot_ = false;
+    bool press_moved_ = false;
+    bool hold_fired_ = false;
+    bool petting_ = false;
+    bool sleeping_ = false;
+    uint32_t last_touch_ms_ = 0;
+    uint32_t last_bot_tap_ms_ = 0;
+    int bot_taps_ = 0;
+    int reaction_ = -1;
+    uint32_t rand_ = 0x2545F491;
+    SparkleFace::Expression emotion_ = SparkleFace::kNeutral;
 
     // Conversation state, guarded by the LVGL lock
     std::string user_text_;
@@ -125,9 +151,11 @@ private:
     void BuildThinking();
     void BuildSpeaking();
     void BuildWifi();
+    void BuildTouchFeedback();
 
     lv_obj_t* AddTwinkle(Page page, int32_t x, int32_t y, int32_t size, uint32_t color,
                          uint32_t period_ms, uint32_t delay_ms);
+    lv_obj_t* AddBotHitArea(Page page, int32_t x, int32_t y, int32_t w, int32_t h);
     void ShowPage(Page page);
     void StartAnimations(Page page);
     void StopAnimations();
@@ -135,11 +163,23 @@ private:
                  uint32_t delay, bool reverse, lv_anim_path_cb_t path = lv_anim_path_ease_in_out);
 
     void OnTick();
+    void OnFrame();
+    void SyncState();
     void UpdateClock();
     void UpdateTexts(DeviceState state);
     void UpdateWifiInfo();
     void AddBubble(bool user, const char* text);
     void ApplyFallbackFont();
+    std::string IdleHint() const;
+
+    static void TouchEventCb(lv_event_t* e);
+    void OnTouchEvent(lv_event_t* e);
+    void OnBotTap(uint32_t now_ms);
+    void Ripple(lv_point_t point, uint32_t color);
+    void ShowHoldProgress(int32_t permille);
+    SparkleFace* ActiveBot();
+    lv_obj_t* ActiveHead();
+    void WakeUp();
 };
 
 #endif  // SPARKLE_DISPLAY_H

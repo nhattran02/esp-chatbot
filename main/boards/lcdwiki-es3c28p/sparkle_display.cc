@@ -12,6 +12,7 @@
 #include <esp_timer.h>
 #include <material_symbols.h>
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 
@@ -45,13 +46,20 @@ constexpr uint32_t kMicFill = 0x3D1D44;     // rgba(255,111,181,.18)
 constexpr int kScreenWidth = 320;
 constexpr int kScreenHeight = 240;
 constexpr int kTickMs = 100;
+constexpr int kFrameMs = 16;            // face, gaze and particles: ~60 fps
+constexpr int kBusyFrameMs = 33;        // listening: its big pulse rings stay at 30 fps
+constexpr uint32_t kFadeMs = 240;       // page cross-fade
+constexpr uint32_t kTapMaxMs = 650;     // longer presses are not taps
+constexpr uint32_t kPetMs = 450;        // holding the bot this long pets it
+constexpr uint32_t kHoldShowMs = 600;   // hold ring appears after this
+constexpr uint32_t kHoldMs = 3000;      // hold elsewhere: Wi-Fi setup
+constexpr int32_t kMoveSlop = 14;       // px of drift before a press is a drag
+constexpr uint32_t kSleepAfterMs = 120 * 1000;
 constexpr int64_t kThinkingDelayUs = 700 * 1000;  // keep the transcript up briefly
 constexpr uint32_t kMaxBubbles = 8;
 constexpr intptr_t kRoleUser = 1;
 constexpr intptr_t kRoleAssistant = 2;
 
-// Must match the configured wake word to be truthful
-constexpr const char* kIdleHint = "Nói #FF6FB5 “Xin chào”# để bắt đầu";
 constexpr const char* kListeningPlaceholder = "Mình đang nghe nè…";
 
 const char* const kWeekdays[] = {"Chủ Nhật", "Thứ Hai", "Thứ Ba", "Thứ Tư",
@@ -171,35 +179,6 @@ void RingCb(void* var, int32_t v) {
     lv_obj_set_style_border_opa(ring, static_cast<lv_opa_t>(230 * (1000 - v) / 1000), 0);
 }
 
-// blink: scaleY 1 -> .08 -> 1 between 90 % and 100 % of a 4.5 s cycle
-void BlinkCb(void* var, int32_t t) {
-    auto blink = static_cast<SparkleDisplay::Blink*>(var);
-    int32_t s = 1000;
-    if (t >= 4050 && t < 4230) {
-        s = 1000 - (t - 4050) * 920 / 180;
-    } else if (t >= 4230) {
-        s = 80 + (t - 4230) * 920 / 270;
-    }
-    for (auto& eye : blink->eyes) {
-        if (eye.body == nullptr) {
-            continue;
-        }
-        int32_t h = std::max<int32_t>(2, eye.height * s / 1000);
-        if (h == eye.last_height) {
-            continue;
-        }
-        eye.last_height = h;
-        lv_obj_set_height(eye.body, h);
-        lv_obj_set_y(eye.body, eye.center_y - h / 2);
-        lv_obj_set_style_image_opa(eye.glow, static_cast<lv_opa_t>(s * 255 / 1000), 0);
-        if (s < 600) {
-            lv_obj_add_flag(eye.shine, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_remove_flag(eye.shine, LV_OBJ_FLAG_HIDDEN);
-        }
-    }
-}
-
 // orbit: place items on a circle, v in degrees
 void OrbitCb(void* var, int32_t v) {
     auto orbit = static_cast<SparkleDisplay::Orbit*>(var);
@@ -236,6 +215,38 @@ void LookCb(void* var, int32_t t) {
 }
 
 // typing dots: hop 6 px and brighten during the first 80 % of 1.2 s
+// ripple: ring grows from the touch point and fades (center in user data)
+void RippleCb(void* var, int32_t v) {
+    auto ring = static_cast<lv_obj_t*>(var);
+    auto center = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(lv_obj_get_user_data(ring)));
+    int32_t cx = static_cast<int32_t>(center >> 16);
+    int32_t cy = static_cast<int32_t>(center & 0xFFFF);
+    int32_t size = 12 + 52 * v / 1000;
+    lv_obj_set_size(ring, size, size);
+    lv_obj_set_pos(ring, cx - size / 2, cy - size / 2);
+    lv_obj_set_style_border_opa(ring, static_cast<lv_opa_t>(220 * (1000 - v) / 1000), 0);
+}
+
+void HideWhenDone(lv_anim_t* a) {
+    lv_obj_add_flag(static_cast<lv_obj_t*>(a->var), LV_OBJ_FLAG_HIDDEN);
+}
+
+// One-shot animation, independent of the page animations
+void Once(void* var, lv_anim_exec_xcb_t cb, int32_t from, int32_t to, uint32_t duration,
+          lv_anim_path_cb_t path, lv_anim_completed_cb_t done = nullptr) {
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, var);
+    lv_anim_set_exec_cb(&a, cb);
+    lv_anim_set_values(&a, from, to);
+    lv_anim_set_duration(&a, duration);
+    lv_anim_set_path_cb(&a, path);
+    if (done != nullptr) {
+        lv_anim_set_completed_cb(&a, done);
+    }
+    lv_anim_start(&a);
+}
+
 void DotCb(void* var, int32_t t) {
     auto dot = static_cast<lv_obj_t*>(var);
     int32_t up = 0;
@@ -345,6 +356,11 @@ void SparkleDisplay::SetupUI() {
     BuildThinking();
     BuildSpeaking();
     BuildWifi();
+
+    // Page changes fade in from the background; the top bar stays put
+    fade_ = Rect(screen, 0, 0, kScreenWidth, kScreenHeight, kBackground, 0);
+    lv_obj_add_flag(fade_, LV_OBJ_FLAG_HIDDEN);
+
     BuildTopBar(screen);
 
     // Base-class labels: status text is read from here, notifications toast
@@ -372,12 +388,27 @@ void SparkleDisplay::SetupUI() {
     lv_obj_center(low_battery_label_);
     lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
 
+    BuildTouchFeedback();
+
     tick_timer_ = lv_timer_create(
         [](lv_timer_t* timer) {
             static_cast<SparkleDisplay*>(lv_timer_get_user_data(timer))->OnTick();
         },
         kTickMs, this);
+    frame_timer_ = lv_timer_create(
+        [](lv_timer_t* timer) {
+            static_cast<SparkleDisplay*>(lv_timer_get_user_data(timer))->OnFrame();
+        },
+        kFrameMs, this);
     OnTick();
+}
+
+void SparkleDisplay::EnableTouch(std::function<void()> on_tap, std::function<void()> on_hold) {
+    DisplayLockGuard lock(this);
+    on_tap_ = std::move(on_tap);
+    on_hold_ = std::move(on_hold);
+    touch_enabled_ = true;
+    texts_dirty_ = true;
 }
 
 lv_obj_t* SparkleDisplay::AddTwinkle(Page page, int32_t x, int32_t y, int32_t size,
@@ -454,22 +485,16 @@ void SparkleDisplay::BuildIdle() {
     Border(head, 2, kFaceIdleBorder);
     lv_obj_t* screen = Rect(head, 0, 0, 94, 76, kFaceScreen, LV_RADIUS_CIRCLE);
     lv_obj_align(screen, LV_ALIGN_CENTER, 0, 0);
-    for (int i = 0; i < 2; i++) {
-        int32_t x = 18 + i * 39;
-        Eye& eye = idle_blink_.eyes[i];
-        eye.glow = Mask(screen, &sparkle_glow_eye_tall, kCyan, x - 14, 20 - 14);
-        eye.body = Rect(screen, x, 20, 19, 24, kCyan, LV_RADIUS_CIRCLE);
-        eye.shine = Rect(eye.body, 3, 4, 5, 6, kWhite, 3);
-        eye.center_y = 32;
-        eye.height = 24;
-    }
-    Arc(screen, 40, 42, 14, 20, 160, 3, kPink);
-    for (int i = 0; i < 2; i++) {
-        lv_obj_t* cheek = Rect(head, 0, 0, 12, 7, kPink, LV_RADIUS_CIRCLE);
-        lv_obj_set_style_bg_opa(cheek, LV_OPA_70, 0);
-        lv_obj_align(cheek, i == 0 ? LV_ALIGN_BOTTOM_LEFT : LV_ALIGN_BOTTOM_RIGHT,
-                     i == 0 ? 10 : -10, -28);
-    }
+    lv_obj_update_layout(head);
+    SparkleFace::Config face;
+    face.screen = screen;
+    face.head = head;
+    face.motion = idle_face_;
+    face.fx_layer = p;
+    face.scale = 256;
+    face.breathe_px = 4;
+    face.breathe_ms = 3200;
+    idle_bot_ = std::make_unique<SparkleFace>(face);
 
     // Clock column
     clock_label_ = Text(p, &sparkle_font_clock_50, kWhite, "--:--");
@@ -492,8 +517,10 @@ void SparkleDisplay::BuildIdle() {
     lv_obj_set_style_pad_column(pill, 8, 0);
     Text(pill, &font_material_symbols_16_4, kPink, MATERIAL_SYMBOLS_MIC);
     hint_label_ = Text(pill, &sparkle_font_text_12, kText, "");
-    lv_obj_set_style_max_width(hint_label_, 240, 0);
+    lv_obj_set_style_max_width(hint_label_, 250, 0);
     lv_label_set_long_mode(hint_label_, LV_LABEL_LONG_MODE_DOTS);
+
+    AddBotHitArea(kPageIdle, 16, 40, 148, 152);
 }
 
 void SparkleDisplay::BuildListening() {
@@ -515,6 +542,7 @@ void SparkleDisplay::BuildListening() {
     Mask(p, &sparkle_glow_face_m, kPink, 87 - 77, 109 - 74);
     lv_obj_t* head = Rect(p, 34, 59, 106, 100, kFace, LV_RADIUS_CIRCLE);
     Border(head, 2, kPink);
+    listen_head_ = head;
     lv_obj_t* screen = Rect(head, 0, 0, 82, 66, kFaceScreen, LV_RADIUS_CIRCLE);
     lv_obj_align(screen, LV_ALIGN_CENTER, 0, 0);
     for (int i = 0; i < 2; i++) {
@@ -558,6 +586,8 @@ void SparkleDisplay::BuildListening() {
     lv_label_set_long_mode(transcript_label_, LV_LABEL_LONG_MODE_DOTS);
     caret_ = Rect(box, 0, 0, 2, 12, kCyan, 0);
     lv_obj_set_style_margin_left(caret_, -6, 0);
+
+    AddBotHitArea(kPageListening, 26, 50, 122, 120);
 }
 
 void SparkleDisplay::BuildThinking() {
@@ -609,6 +639,7 @@ void SparkleDisplay::BuildThinking() {
     Mask(p, &sparkle_glow_face_s, kPurple, kCx - 73, kCy - 70);
     lv_obj_t* head = Rect(p, kCx - 49, kCy - 46, 98, 92, kFace, LV_RADIUS_CIRCLE);
     Border(head, 2, kPurple);
+    think_head_ = head;
     lv_obj_t* screen = Rect(head, 0, 0, 74, 60, kFaceScreen, LV_RADIUS_CIRCLE);
     lv_obj_align(screen, LV_ALIGN_CENTER, 0, 0);
     for (int i = 0; i < 2; i++) {
@@ -654,6 +685,8 @@ void SparkleDisplay::BuildThinking() {
     lv_obj_set_width(think_caption_, 300);
     lv_obj_set_style_text_align(think_caption_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_line_space(think_caption_, -3, 0);
+
+    AddBotHitArea(kPageThinking, kCx - 60, kCy - 56, 120, 112);
 }
 
 void SparkleDisplay::BuildSpeaking() {
@@ -668,16 +701,19 @@ void SparkleDisplay::BuildSpeaking() {
     Border(head, 2, kCyan);
     lv_obj_t* screen = Rect(head, 0, 0, 58, 48, kFaceScreen, LV_RADIUS_CIRCLE);
     lv_obj_align(screen, LV_ALIGN_CENTER, 0, 0);
-    for (int i = 0; i < 2; i++) {
-        Arc(screen, 12 + i * 22, 15, 12, 180, 360, 3, kCyan);  // happy ^ ^ eyes
-    }
-    mouth_ = Rect(screen, 23, 26, 12, 6, kPink, 4);
-    for (int i = 0; i < 2; i++) {
-        lv_obj_t* cheek = Rect(head, 0, 0, 8, 5, kPink, LV_RADIUS_CIRCLE);
-        lv_obj_set_style_bg_opa(cheek, 191, 0);
-        lv_obj_align(cheek, i == 0 ? LV_ALIGN_BOTTOM_LEFT : LV_ALIGN_BOTTOM_RIGHT,
-                     i == 0 ? 5 : -5, -13);
-    }
+    lv_obj_update_layout(head);
+    // Same face as idle at 58/94 scale; it talks and shows the server's emotion
+    SparkleFace::Config face;
+    face.screen = screen;
+    face.head = head;
+    face.motion = speak_face_;
+    face.fx_layer = p;
+    face.scale = 158;
+    face.breathe_px = 3;
+    face.breathe_ms = 2400;
+    speak_bot_ = std::make_unique<SparkleFace>(face);
+    speak_bot_->SetWander(false);
+    speak_bot_->SetTalking(true);
 
     static const uint32_t kBarColors[] = {kCyan, 0x8FB8FF, kPurple, 0xE58CFF, kPink};
     lv_obj_t* bars = Box(p);
@@ -700,6 +736,8 @@ void SparkleDisplay::BuildSpeaking() {
     lv_obj_set_style_pad_row(chat_list_, 7, 0);
     // Room for the assistant bubble glow
     lv_obj_set_style_pad_all(chat_list_, 4, 0);
+
+    AddBotHitArea(kPageSpeaking, 2, 20, 94, 92);
 }
 
 void SparkleDisplay::BuildWifi() {
@@ -796,10 +834,8 @@ void SparkleDisplay::StartAnimations(Page page) {
 
     switch (page) {
         case kPageIdle:
-            Animate(idle_face_, TranslateYCb, 0, -4, 1600, 0, true);
+            // The face itself (bob, blink, gaze) is driven by OnFrame()
             Animate(idle_antenna_star_, ImageOpaCb, 140, 255, 800, 0, true);
-            idle_blink_.eyes[0].last_height = idle_blink_.eyes[1].last_height = -1;
-            Animate(&idle_blink_, BlinkCb, 0, 4499, 4500, 0, false, lv_anim_path_linear);
             break;
         case kPageListening: {
             for (int i = 0; i < 2; i++) {
@@ -823,8 +859,6 @@ void SparkleDisplay::StartAnimations(Page page) {
             }
             break;
         case kPageSpeaking:
-            Animate(speak_face_, TranslateYCb, 0, -3, 1200, 0, true);
-            Animate(mouth_, HeightCb, 3, 10, 175, 0, true);
             for (int i = 0; i < 5; i++) {
                 Animate(speak_bars_[i], HeightCb, 4, 14, 350, i * 100, true);
             }
@@ -847,12 +881,36 @@ void SparkleDisplay::ShowPage(Page page) {
         return;
     }
     StopAnimations();
-    if (page_ != kPageNone) {
+    bool first = page_ == kPageNone;
+    if (!first) {
         lv_obj_add_flag(pages_[page_], LV_OBJ_FLAG_HIDDEN);
     }
     page_ = page;
     lv_obj_remove_flag(pages_[page_], LV_OBJ_FLAG_HIDDEN);
     StartAnimations(page_);
+
+    // 60 fps rendering and animation where the redrawn areas are small; the
+    // listening rings repaint ~200x200 px per frame, so that page keeps 30 fps
+    int period = page_ == kPageListening ? kBusyFrameMs : kFrameMs;
+    lv_timer_set_period(lv_display_get_refr_timer(display_), period);
+    lv_timer_set_period(lv_anim_get_timer(), period);
+
+    // Cross-fade: the new page rises out of the background color
+    if (!first) {
+        lv_anim_delete(fade_, nullptr);
+        lv_obj_set_style_opa(fade_, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(fade_, LV_OBJ_FLAG_HIDDEN);
+        Once(fade_, OpaCb, 255, 0, kFadeMs, lv_anim_path_ease_out, HideWhenDone);
+    }
+
+    // A press does not survive a page change
+    lv_obj_add_flag(hold_track_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(hold_arc_, LV_OBJ_FLAG_HIDDEN);
+    if (petting_ && idle_bot_ != nullptr) {
+        petting_ = false;
+        idle_bot_->Release();
+    }
+    WakeUp();
 
     // Top bar: brand on idle, "Cài đặt" in setup, the time elsewhere
     bool idle = page_ == kPageIdle;
@@ -874,11 +932,274 @@ void SparkleDisplay::ShowPage(Page page) {
         lv_obj_remove_flag(network_label_, LV_OBJ_FLAG_HIDDEN);
     }
     clock_minute_ = -2;  // re-render the bar title
+    UpdateClock();
+}
+
+// ---------------------------------------------------------------- touch
+
+lv_obj_t* SparkleDisplay::AddBotHitArea(Page page, int32_t x, int32_t y, int32_t w, int32_t h) {
+    lv_obj_t* area = Box(pages_[page]);
+    lv_obj_set_pos(area, x, y);
+    lv_obj_set_size(area, w, h);
+    lv_obj_add_flag(area, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(area, TouchEventCb, LV_EVENT_ALL, this);
+    bot_hit_[page] = area;
+    return area;
+}
+
+void SparkleDisplay::BuildTouchFeedback() {
+    // Everything that is not the bot is "elsewhere"; the chat list also
+    // scrolls with a drag, which LVGL keeps apart from taps
+    for (auto page : pages_) {
+        lv_obj_add_flag(page, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(page, TouchEventCb, LV_EVENT_ALL, this);
+    }
+    lv_obj_add_flag(chat_list_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(chat_list_, TouchEventCb, LV_EVENT_ALL, this);
+
+    for (auto& ring : ripples_) {
+        ring = Box(lv_layer_top());
+        lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, 0);
+        Border(ring, 2, kCyan);
+        lv_obj_add_flag(ring, LV_OBJ_FLAG_HIDDEN);
+    }
+    hold_track_ = Arc(lv_layer_top(), 0, 0, 52, 0, 360, 4, kPillBorder);
+    hold_arc_ = Arc(lv_layer_top(), 0, 0, 52, 270, 271, 4, kPink);
+    lv_obj_add_flag(hold_track_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(hold_arc_, LV_OBJ_FLAG_HIDDEN);
+}
+
+void SparkleDisplay::TouchEventCb(lv_event_t* e) {
+    static_cast<SparkleDisplay*>(lv_event_get_user_data(e))->OnTouchEvent(e);
+}
+
+SparkleFace* SparkleDisplay::ActiveBot() {
+    if (page_ == kPageIdle) {
+        return idle_bot_.get();
+    }
+    if (page_ == kPageSpeaking) {
+        return speak_bot_.get();
+    }
+    return nullptr;
+}
+
+lv_obj_t* SparkleDisplay::ActiveHead() {
+    if (page_ == kPageListening) {
+        return listen_head_;
+    }
+    if (page_ == kPageThinking) {
+        return think_head_;
+    }
+    return nullptr;
+}
+
+void SparkleDisplay::WakeUp() {
+    last_touch_ms_ = lv_tick_get();
+    if (sleeping_ && idle_bot_ != nullptr) {
+        sleeping_ = false;
+        idle_bot_->Release();
+    }
+}
+
+void SparkleDisplay::OnTouchEvent(lv_event_t* e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code != LV_EVENT_PRESSED && code != LV_EVENT_PRESSING && code != LV_EVENT_RELEASED &&
+        code != LV_EVENT_PRESS_LOST && code != LV_EVENT_SCROLL_BEGIN) {
+        return;
+    }
+    if (page_ == kPageNone) {
+        return;
+    }
+    auto target = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+    lv_point_t point = press_point_;
+    lv_indev_t* indev = lv_indev_active();
+    if (indev != nullptr) {
+        lv_indev_get_point(indev, &point);
+    }
+    uint32_t now = lv_tick_get();
+    SparkleFace* face = ActiveBot();
+
+    switch (code) {
+        case LV_EVENT_PRESSED: {
+            bool was_sleeping = sleeping_;
+            press_point_ = point;
+            press_ms_ = now;
+            press_on_bot_ = target == bot_hit_[page_];
+            press_moved_ = false;
+            hold_fired_ = false;
+            WakeUp();
+            if (face != nullptr) {
+                face->LookAt(point.x, point.y);
+            }
+            if (press_on_bot_) {
+                if (face != nullptr) {
+                    face->Boop();
+                } else if (ActiveHead() != nullptr) {
+                    Once(ActiveHead(), TranslateYCb, 6, 0, 380, lv_anim_path_overshoot);
+                }
+                if (was_sleeping) {
+                    // Startled awake; this press is spent
+                    idle_bot_->Play(SparkleFace::kSurprised, 1400);
+                    hold_fired_ = true;
+                }
+            } else {
+                Ripple(point, page_ == kPageListening ? kPink : kCyan);
+            }
+            break;
+        }
+        case LV_EVENT_PRESSING: {
+            if (std::abs(point.x - press_point_.x) > kMoveSlop ||
+                std::abs(point.y - press_point_.y) > kMoveSlop) {
+                press_moved_ = true;
+            }
+            if (face != nullptr) {
+                face->LookAt(point.x, point.y);
+            }
+            uint32_t held = now - press_ms_;
+            if (press_on_bot_) {
+                // Holding (or stroking) the idle bot pets it
+                if (!petting_ && !hold_fired_ && page_ == kPageIdle && held >= kPetMs) {
+                    petting_ = true;
+                    idle_bot_->Hold(SparkleFace::kPetted);
+                }
+            } else if (!press_moved_ && !hold_fired_ && on_hold_ && page_ != kPageWifi) {
+                if (held >= kHoldMs) {
+                    hold_fired_ = true;
+                    ShowHoldProgress(-1);
+                    Ripple(press_point_, kPink);
+                    on_hold_();
+                } else if (held >= kHoldShowMs) {
+                    ShowHoldProgress((held - kHoldShowMs) * 1000 / (kHoldMs - kHoldShowMs));
+                }
+            } else {
+                ShowHoldProgress(-1);
+            }
+            break;
+        }
+        case LV_EVENT_SCROLL_BEGIN:
+            press_moved_ = true;
+            ShowHoldProgress(-1);
+            break;
+        default: {  // released or lost
+            ShowHoldProgress(-1);
+            if (face != nullptr) {
+                face->ClearLook();
+            }
+            if (petting_) {
+                petting_ = false;
+                idle_bot_->Release(1200);
+                break;
+            }
+            if (code == LV_EVENT_RELEASED && !hold_fired_ && !press_moved_ &&
+                now - press_ms_ <= kTapMaxMs) {
+                if (press_on_bot_) {
+                    OnBotTap(now);
+                } else if (on_tap_) {
+                    on_tap_();
+                }
+            }
+            break;
+        }
+    }
+}
+
+void SparkleDisplay::OnBotTap(uint32_t now_ms) {
+    rand_ ^= rand_ << 13;
+    rand_ ^= rand_ >> 17;
+    rand_ ^= rand_ << 5;
+
+    if (page_ == kPageIdle) {
+        // Poking it over and over makes it dizzy
+        bot_taps_ = now_ms - last_bot_tap_ms_ < 700 ? bot_taps_ + 1 : 1;
+        last_bot_tap_ms_ = now_ms;
+        if (bot_taps_ >= 5) {
+            bot_taps_ = 0;
+            idle_bot_->Play(SparkleFace::kDizzy, 2800);
+            return;
+        }
+        static const SparkleFace::Expression kReactions[] = {
+            SparkleFace::kHappy,   SparkleFace::kLove,  SparkleFace::kSurprised,
+            SparkleFace::kWink,    SparkleFace::kLaugh, SparkleFace::kShy,
+            SparkleFace::kStarry,  SparkleFace::kKissy, SparkleFace::kAngry,
+            SparkleFace::kConfused, SparkleFace::kSmug,
+        };
+        constexpr int kCount = sizeof(kReactions) / sizeof(kReactions[0]);
+        int next = static_cast<int>(rand_ % (kCount - 1));
+        if (next >= reaction_ && reaction_ >= 0) {
+            next++;  // never the same reaction twice in a row
+        }
+        reaction_ = next;
+        idle_bot_->Play(kReactions[next], 2300);
+    } else if (page_ == kPageSpeaking) {
+        static const SparkleFace::Expression kReactions[] = {
+            SparkleFace::kHappy, SparkleFace::kLove, SparkleFace::kWink, SparkleFace::kStarry};
+        speak_bot_->Play(kReactions[rand_ % 4], 1500);
+        speak_bot_->Burst(2);
+    }
+}
+
+void SparkleDisplay::Ripple(lv_point_t point, uint32_t color) {
+    lv_obj_t* ring = ripples_[next_ripple_];
+    next_ripple_ = (next_ripple_ + 1) % 3;
+    uint32_t center = (static_cast<uint32_t>(point.x) << 16) | static_cast<uint32_t>(point.y);
+    lv_obj_set_user_data(ring, reinterpret_cast<void*>(static_cast<uintptr_t>(center)));
+    lv_obj_set_style_border_color(ring, lv_color_hex(color), 0);
+    lv_anim_delete(ring, nullptr);
+    RippleCb(ring, 0);
+    lv_obj_remove_flag(ring, LV_OBJ_FLAG_HIDDEN);
+    Once(ring, RippleCb, 0, 1000, 480, lv_anim_path_ease_out, HideWhenDone);
+}
+
+void SparkleDisplay::ShowHoldProgress(int32_t permille) {
+    if (permille < 0) {
+        if (!lv_obj_has_flag(hold_arc_, LV_OBJ_FLAG_HIDDEN)) {
+            lv_obj_add_flag(hold_track_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(hold_arc_, LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+    if (lv_obj_has_flag(hold_arc_, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_set_pos(hold_track_, press_point_.x - 26, press_point_.y - 26);
+        lv_obj_set_pos(hold_arc_, press_point_.x - 26, press_point_.y - 26);
+        lv_obj_remove_flag(hold_track_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(hold_arc_, LV_OBJ_FLAG_HIDDEN);
+    }
+    int32_t degrees = std::clamp<int32_t>(permille * 360 / 1000, 1, 360);
+    if (degrees >= 360) {
+        lv_arc_set_bg_angles(hold_arc_, 0, 360);
+    } else {
+        lv_arc_set_bg_angles(hold_arc_, 270, (270 + degrees) % 360);
+    }
+}
+
+void SparkleDisplay::OnFrame() {
+    SyncState();
+    uint32_t now = lv_tick_get();
+    if (page_ == kPageIdle && idle_bot_ != nullptr) {
+        // Dozes off after a long quiet spell; any touch wakes it
+        if (!sleeping_ && !petting_ && idle_bot_->base() == SparkleFace::kNeutral &&
+            now - last_touch_ms_ > kSleepAfterMs) {
+            sleeping_ = true;
+            idle_bot_->Hold(SparkleFace::kSleepy);
+        }
+        idle_bot_->Update(now);
+    } else if (page_ == kPageSpeaking && speak_bot_ != nullptr) {
+        speak_bot_->Update(now);
+    }
 }
 
 // ---------------------------------------------------------------- state and text
 
 void SparkleDisplay::OnTick() {
+    SyncState();
+    if (page_ == kPageWifi) {
+        UpdateWifiInfo();
+    }
+    UpdateClock();
+}
+
+// Runs every frame, so a state change shows up on the next frame
+void SparkleDisplay::SyncState() {
     auto state = Application::GetInstance().GetDeviceState();
     int64_t now = esp_timer_get_time();
     if (state != last_state_) {
@@ -917,10 +1238,6 @@ void SparkleDisplay::OnTick() {
         texts_dirty_ = false;
         UpdateTexts(state);
     }
-    if (page_ == kPageWifi) {
-        UpdateWifiInfo();
-    }
-    UpdateClock();
 }
 
 void SparkleDisplay::UpdateClock() {
@@ -974,10 +1291,30 @@ void SparkleDisplay::UpdateTexts(DeviceState state) {
 
     // Alerts replace the idle hint until the application clears them
     lv_label_set_recolor(hint_label_, system_text_.empty());
-    SetTextIfChanged(hint_label_, system_text_.empty() ? kIdleHint : system_text_.c_str());
+    std::string hint = system_text_.empty() ? IdleHint() : system_text_;
+    SetTextIfChanged(hint_label_, hint.c_str());
 
     std::string ssid = WifiManager::GetInstance().GetSsid();
     SetTextIfChanged(info_label_, ssid.empty() ? "Chưa có Wi-Fi" : ssid.c_str());
+}
+
+std::string SparkleDisplay::IdleHint() const {
+    // Name the wake words actually loaded, so the hint is always truthful
+    std::string words;
+    auto wake_words = Application::GetInstance().GetAudioService().GetWakeWords();
+    for (size_t i = 0; i < wake_words.size(); i++) {
+        const std::string& word = wake_words[i];
+        if (word.empty() || std::find(wake_words.begin(), wake_words.begin() + i, word) !=
+                                wake_words.begin() + i) {
+            continue;
+        }
+        words += words.empty() ? word : " / " + word;
+    }
+    if (!words.empty()) {
+        return "Nói #FF6FB5 “" + words + "”# " +
+               (touch_enabled_ ? "hoặc chạm màn hình" : "để bắt đầu");
+    }
+    return touch_enabled_ ? "Chạm màn hình để trò chuyện" : "Nhấn nút BOOT để trò chuyện";
 }
 
 void SparkleDisplay::UpdateWifiInfo() {
@@ -1037,6 +1374,12 @@ void SparkleDisplay::AddBubble(bool user, const char* text) {
         lv_obj_set_style_shadow_opa(bubble, 90, 0);
         FitLabel(bubble, text, 196, 20);
     }
+
+    // Messenger-style entry: rise and fade in
+    lv_obj_set_style_translate_y(row, 12, 0);
+    lv_obj_set_style_opa(bubble, LV_OPA_TRANSP, 0);
+    Once(row, TranslateYCb, 12, 0, 280, lv_anim_path_ease_out);
+    Once(bubble, OpaCb, 0, 255, 220, lv_anim_path_ease_out);
 
     lv_obj_update_layout(chat_list_);
     lv_obj_scroll_to_view(row, LV_ANIM_ON);
@@ -1105,8 +1448,14 @@ void SparkleDisplay::SetStatus(const char* status) {
 }
 
 void SparkleDisplay::SetEmotion(const char* emotion) {
-    // Faces follow the device state; emotions have no separate artwork
-    (void)emotion;
+    DisplayLockGuard lock(this);
+    emotion_ = SparkleFace::FromEmotion(emotion);
+    if (idle_bot_ != nullptr) {
+        idle_bot_->SetBase(emotion_);
+    }
+    if (speak_bot_ != nullptr) {
+        speak_bot_->SetBase(emotion_);
+    }
 }
 
 void SparkleDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {

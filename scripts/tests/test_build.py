@@ -1075,6 +1075,30 @@ class BuildOptionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Invalid wake word"):
             build._wake_word_sdkconfig_options("jarvis", "esp32s3")
 
+    def test_custom_wake_word_selects_english_multinet(self):
+        model, options, symbols = build._wake_word_sdkconfig_options(
+            "custom:Hello, hi;hello",
+            "esp32s3",
+        )
+        self.assertEqual(model, "custom:hello,hi")
+        self.assertIn("CONFIG_USE_CUSTOM_WAKE_WORD=y", options)
+        self.assertIn("CONFIG_USE_AFE_WAKE_WORD=n", options)
+        self.assertIn("CONFIG_SR_MN_EN_MULTINET7_QUANT=y", options)
+        self.assertIn('CONFIG_CUSTOM_WAKE_WORD="hello;hi"', options)
+        self.assertIn('CONFIG_CUSTOM_WAKE_WORD_DISPLAY="Hello;Hi"', options)
+        self.assertFalse(any(option.startswith("CONFIG_SR_WN_") for option in options))
+        self.assertEqual(
+            symbols,
+            ["CONFIG_USE_CUSTOM_WAKE_WORD", "CONFIG_SR_MN_EN_MULTINET7_QUANT"],
+        )
+
+    def test_custom_wake_word_is_validated(self):
+        with self.assertRaisesRegex(ValueError, "not supported"):
+            build._wake_word_sdkconfig_options("custom:hello", "esp32c3")
+        for bad in ("custom:", "custom: , ", "custom:xin chào", 'custom:hi"', "custom:hi2"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                build._wake_word_sdkconfig_options(bad, "esp32s3")
+
     def test_board_wake_word_support_obeys_psram_dependency(self):
         self.assertTrue(build._board_supports_wake_word("esp32c3", []))
         self.assertFalse(build._board_supports_wake_word("esp32", []))

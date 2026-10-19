@@ -17,8 +17,9 @@
 #include <esp_lcd_ili9341.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
+#include <esp_lcd_touch_ft5x06.h>
 #include <esp_log.h>
-#include <esp_timer.h>
+#include <esp_lvgl_port.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -51,50 +52,11 @@ static const ili9341_lcd_init_cmd_t lcd_init_cmds[] = {
     {0x29, (uint8_t[]){0x00}, 0, 20},
 };
 
-// Minimal FT6336G reader (only "is the screen touched" is needed here)
-class Ft6336Touch {
-public:
-    bool Init(i2c_master_bus_handle_t bus) {
-        gpio_config_t rst = {};
-        rst.pin_bit_mask = 1ULL << TOUCH_RST_PIN;
-        rst.mode = GPIO_MODE_OUTPUT;
-        gpio_config(&rst);
-        gpio_set_level(TOUCH_RST_PIN, 0);
-        vTaskDelay(pdMS_TO_TICKS(10));
-        gpio_set_level(TOUCH_RST_PIN, 1);
-        vTaskDelay(pdMS_TO_TICKS(300));
-
-        if (i2c_master_probe(bus, TOUCH_I2C_ADDR, 100) != ESP_OK) {
-            ESP_LOGW(TAG, "FT6336G not found (ES3N28P has no touch panel)");
-            return false;
-        }
-        i2c_device_config_t cfg = {};
-        cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
-        cfg.device_address = TOUCH_I2C_ADDR;
-        cfg.scl_speed_hz = 400000;
-        return i2c_master_bus_add_device(bus, &cfg, &dev_) == ESP_OK;
-    }
-
-    bool IsTouched() {
-        uint8_t reg = 0x02, buf[5];
-        if (dev_ == nullptr ||
-            i2c_master_transmit_receive(dev_, &reg, 1, buf, sizeof(buf), 50) != ESP_OK) {
-            return false;
-        }
-        uint8_t points = buf[0] & 0x0F;
-        return points > 0 && points <= 2;
-    }
-
-private:
-    i2c_master_dev_handle_t dev_ = nullptr;
-};
-
 class LCDWikiES3C28PBoard : public WifiBoard {
 private:
     Button boot_button_;
     SparkleDisplay* display_ = nullptr;
     i2c_master_bus_handle_t i2c_bus_ = nullptr;
-    Ft6336Touch touch_;
     AdcBatteryMonitor* battery_ = nullptr;
 
     void InitializeI2c() {
@@ -165,40 +127,86 @@ private:
                                       DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
     }
 
-    // Touch gestures: tap = start/stop conversation, hold 3 s = Wi-Fi setup
-    static void TouchTask(void* arg) {
-        auto* self = static_cast<LCDWikiES3C28PBoard*>(arg);
-        bool down = false;
-        int64_t down_start = 0;
-        while (true) {
-            bool touched = self->touch_.IsTouched();
-            int64_t now = esp_timer_get_time() / 1000;
-            if (touched && !down) {
-                down = true;
-                down_start = now;
-            } else if (!touched && down) {
-                down = false;
-                int64_t held = now - down_start;
-                if (held >= 3000) {
-                    self->EnterWifiConfigMode();
-                } else if (held >= 30) {
-                    auto& app = Application::GetInstance();
-                    if (app.GetDeviceState() == kDeviceStateStarting) {
-                        self->EnterWifiConfigMode();
-                    } else {
-                        app.ToggleChatState();
-                    }
-                }
-            }
-            vTaskDelay(pdMS_TO_TICKS(30));
-        }
+    // Wi-Fi setup starts the AP and web server: keep that off the LVGL task
+    // (the main loop may still be busy starting up)
+    void EnterWifiConfigModeAsync() {
+        xTaskCreate(
+            [](void* arg) {
+                static_cast<LCDWikiES3C28PBoard*>(arg)->EnterWifiConfigMode();
+                vTaskDelete(nullptr);
+            },
+            "wifi_cfg_touch", 4096, this, 2, nullptr);
     }
 
+    // FT6336G as an LVGL pointer, so the UI knows where the screen is touched:
+    // the bot reacts to touches, elsewhere tap = start/stop, hold 3 s = Wi-Fi setup
     void InitializeTouch() {
-        if (touch_.Init(i2c_bus_)) {
-            xTaskCreatePinnedToCore(TouchTask, "touch_task", 4096, this, 5, nullptr, 0);
-            ESP_LOGI(TAG, "FT6336G touch ready");
+        gpio_config_t rst = {};
+        rst.pin_bit_mask = 1ULL << TOUCH_RST_PIN;
+        rst.mode = GPIO_MODE_OUTPUT;
+        gpio_config(&rst);
+        gpio_set_level(TOUCH_RST_PIN, 0);
+        vTaskDelay(pdMS_TO_TICKS(10));
+        gpio_set_level(TOUCH_RST_PIN, 1);
+        vTaskDelay(pdMS_TO_TICKS(300));
+        if (i2c_master_probe(i2c_bus_, TOUCH_I2C_ADDR, 100) != ESP_OK) {
+            ESP_LOGW(TAG, "FT6336G not found (ES3N28P has no touch panel)");
+            return;
         }
+
+        esp_lcd_panel_io_handle_t io = nullptr;
+        esp_lcd_panel_io_i2c_config_t io_config = {};
+        io_config.dev_addr = TOUCH_I2C_ADDR;
+        io_config.control_phase_bytes = 1;
+        io_config.dc_bit_offset = 0;
+        io_config.lcd_cmd_bits = 8;
+        io_config.flags.disable_control_phase = 1;
+        io_config.scl_speed_hz = 400000;
+        if (esp_lcd_new_panel_io_i2c(i2c_bus_, &io_config, &io) != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to create touch panel IO");
+            return;
+        }
+        esp_lcd_touch_config_t tp_config = {};
+        tp_config.x_max = DISPLAY_HEIGHT;  // native portrait axes
+        tp_config.y_max = DISPLAY_WIDTH;
+        tp_config.rst_gpio_num = GPIO_NUM_NC;  // reset above
+        tp_config.int_gpio_num = GPIO_NUM_NC;
+        tp_config.flags.swap_xy = TOUCH_SWAP_XY;
+        tp_config.flags.mirror_x = TOUCH_MIRROR_X;
+        tp_config.flags.mirror_y = TOUCH_MIRROR_Y;
+        esp_lcd_touch_handle_t tp = nullptr;
+        if (esp_lcd_touch_new_i2c_ft5x06(io, &tp_config, &tp) != ESP_OK || tp == nullptr) {
+            ESP_LOGW(TAG, "FT6336G init failed, continuing without touch");
+            esp_lcd_panel_io_del(io);
+            return;
+        }
+
+        lvgl_port_touch_cfg_t touch_config = {};
+        touch_config.disp = lv_display_get_default();
+        touch_config.handle = tp;
+        lv_indev_t* indev = lvgl_port_add_touch(&touch_config);
+        if (indev == nullptr) {
+            ESP_LOGW(TAG, "Failed to register touch with LVGL");
+            return;
+        }
+        if (lvgl_port_lock(0)) {
+            // Read at 60 Hz so the eyes follow a finger smoothly
+            lv_timer_set_period(lv_indev_get_read_timer(indev), 16);
+            lvgl_port_unlock();
+        }
+
+        // Callbacks run in the LVGL task and must not block it
+        display_->EnableTouch(
+            [this]() {
+                auto& app = Application::GetInstance();
+                if (app.GetDeviceState() == kDeviceStateStarting) {
+                    EnterWifiConfigModeAsync();
+                } else {
+                    app.ToggleChatState();  // only sets an event bit
+                }
+            },
+            [this]() { EnterWifiConfigModeAsync(); });
+        ESP_LOGI(TAG, "FT6336G touch ready");
     }
 
     void InitializeButtons() {

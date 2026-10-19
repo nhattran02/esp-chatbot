@@ -764,6 +764,22 @@ def read_custom_wake_word_from_sdkconfig(sdkconfig_path):
     return None
 
 
+def custom_wake_word_commands(config):
+    """One wake command per ';'-separated phrase ("hello;hi").
+
+    Display texts are split the same way; a single display text, or a count
+    that does not match, applies the whole display text to every phrase.
+    """
+    phrases = [p.strip() for p in config['wake_word'].split(';') if p.strip()]
+    displays = [d.strip() for d in config['display'].split(';') if d.strip()]
+    if len(displays) != len(phrases):
+        displays = [config['display']] * len(phrases)
+    return [
+        {"command": phrase, "text": display, "action": "wake"}
+        for phrase, display in zip(phrases, displays)
+    ]
+
+
 def get_language_from_multinet_models(multinet_models):
     """
     Determine language from multinet model names
@@ -1067,13 +1083,7 @@ def main():
             "language": language,
             "duration": 3000,  # Default duration in ms
             "threshold": custom_wake_word_config['threshold'],
-            "commands": [
-                {
-                    "command": custom_wake_word_config['wake_word'],
-                    "text": custom_wake_word_config['display'],
-                    "action": "wake"
-                }
-            ]
+            "commands": custom_wake_word_commands(custom_wake_word_config),
         }
         print(f"  custom wake word: {custom_wake_word_config['wake_word']} ({custom_wake_word_config['display']})")
         print(f"  wake word language: {language}")

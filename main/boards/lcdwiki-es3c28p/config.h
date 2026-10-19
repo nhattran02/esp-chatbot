@@ -61,5 +61,10 @@
 #define TOUCH_I2C_ADDR           0x38
 #define TOUCH_RST_PIN            GPIO_NUM_18
 #define TOUCH_INT_PIN            GPIO_NUM_17
+// Map the panel's native portrait coordinates onto the landscape UI (same
+// transform as the display). If taps land mirrored, flip TOUCH_MIRROR_*.
+#define TOUCH_SWAP_XY            DISPLAY_SWAP_XY
+#define TOUCH_MIRROR_X           DISPLAY_MIRROR_X
+#define TOUCH_MIRROR_Y           DISPLAY_MIRROR_Y
 
 #endif  // _BOARD_CONFIG_H_

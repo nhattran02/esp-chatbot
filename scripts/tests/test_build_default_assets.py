@@ -251,6 +251,25 @@ class ConfiguredAssetsTest(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         BUILD.read_assets_entries(base)
 
+    def test_custom_wake_word_phrases_become_separate_commands(self):
+        commands = BUILD.custom_wake_word_commands(
+            {"wake_word": "hello;hi", "display": "Hello;Hi", "threshold": 0.2}
+        )
+        self.assertEqual(
+            commands,
+            [
+                {"command": "hello", "text": "Hello", "action": "wake"},
+                {"command": "hi", "text": "Hi", "action": "wake"},
+            ],
+        )
+        # One display text (the menuconfig default style) applies to all
+        commands = BUILD.custom_wake_word_commands(
+            {"wake_word": "xiao tu dou", "display": "小土豆", "threshold": 0.2}
+        )
+        self.assertEqual(
+            commands, [{"command": "xiao tu dou", "text": "小土豆", "action": "wake"}]
+        )
+
     def test_cli_rejects_enabled_wake_word_without_a_selected_model(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -35,6 +35,8 @@ _WAKE_WORD_TARGETS = (
     "esp32s31",
 )
 _WAKE_WORD_MODEL_PATTERN = re.compile(r"^wn9[sl]?_[a-z0-9_]+$")
+_CUSTOM_WAKE_WORD_PREFIX = "custom:"
+_CUSTOM_WAKE_PHRASE_PATTERN = re.compile(r"^[a-z]+(?: [a-z]+)*$")
 _ESP_SR_KCONFIG = Path(
     "managed_components/espressif__esp-sr/Kconfig.projbuild"
 )
@@ -325,11 +327,56 @@ def _board_supports_wake_word(
     return assignments.get("CONFIG_SPIRAM") == "y"
 
 
+def _custom_wake_word_sdkconfig_options(
+    phrases_text: str,
+    target: str,
+) -> tuple[str, list[str], list[str]]:
+    """Map English phrases ("hello,hi") to the MultiNet custom wake word."""
+    if target not in _AFE_WAKE_WORD_TARGETS:
+        raise ValueError(
+            f"Custom wake words need MultiNet on {', '.join(sorted(_AFE_WAKE_WORD_TARGETS))}; "
+            f"target {target} is not supported"
+        )
+    phrases: list[str] = []
+    for item in re.split(r"[,;]", phrases_text):
+        phrase = " ".join(item.split()).casefold()
+        if not phrase:
+            continue
+        if not _CUSTOM_WAKE_PHRASE_PATTERN.fullmatch(phrase):
+            raise ValueError(
+                f"Invalid custom wake phrase {phrase!r}: use English words (a-z) "
+                "separated by spaces, for example 'custom:hello,hi'"
+            )
+        if phrase not in phrases:
+            phrases.append(phrase)
+    if not phrases:
+        raise ValueError("A custom wake word needs at least one phrase, e.g. 'custom:hello,hi'")
+
+    # Phrases share one Kconfig string; build_default_assets.py splits it
+    display = ";".join(phrase[:1].upper() + phrase[1:] for phrase in phrases)
+    options = [
+        "CONFIG_WAKE_WORD_DISABLED=n",
+        "CONFIG_USE_ESP_WAKE_WORD=n",
+        "CONFIG_USE_AFE_WAKE_WORD=n",
+        "CONFIG_USE_CUSTOM_WAKE_WORD=y",
+        "CONFIG_SR_MN_EN_MULTINET7_QUANT=y",
+        f'CONFIG_CUSTOM_WAKE_WORD="{";".join(phrases)}"',
+        f'CONFIG_CUSTOM_WAKE_WORD_DISPLAY="{display}"',
+    ]
+    symbols = ["CONFIG_USE_CUSTOM_WAKE_WORD", "CONFIG_SR_MN_EN_MULTINET7_QUANT"]
+    return _CUSTOM_WAKE_WORD_PREFIX + ",".join(phrases), options, symbols
+
+
 def _wake_word_sdkconfig_options(
     wake_word: str,
     target: str,
 ) -> tuple[str, list[str], list[str]]:
     """Map a wake-word model to implementation and model Kconfig options."""
+    if wake_word.strip().casefold().startswith(_CUSTOM_WAKE_WORD_PREFIX):
+        return _custom_wake_word_sdkconfig_options(
+            wake_word.strip()[len(_CUSTOM_WAKE_WORD_PREFIX):],
+            target,
+        )
     normalized = wake_word.strip().casefold().replace("-", "_")
     if normalized == "nihaoxiaozhi":
         normalized = (
@@ -1780,7 +1827,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         metavar="MODEL",
         help=(
             "Wake-word model (for example wn9_jarvis_tts), "
-            "'nihaoxiaozhi', 'hiesp', or 'disabled'. Defaults to nihaoxiaozhi "
+            "'nihaoxiaozhi', 'hiesp', 'disabled', or English MultiNet phrases "
+            "such as 'custom:hello,hi' (ESP32-S3/P4/S31). Defaults to nihaoxiaozhi "
             "for zh-CN/zh-TW and hiesp otherwise; disabled on unsupported boards"
         ),
     )
