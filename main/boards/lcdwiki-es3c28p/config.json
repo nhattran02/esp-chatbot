@@ -3,7 +3,11 @@
     "target": "esp32s3",
     "builds": [
         {
-            "name": "lcdwiki-es3c28p"
+            "name": "lcdwiki-es3c28p",
+            "sdkconfig_append": [
+                "CONFIG_LV_FONT_UNSCII_8=y",
+                "CONFIG_LV_FONT_UNSCII_16=y"
+            ]
         }
     ]
 }

@@ -46,12 +46,12 @@
 #define DISPLAY_BACKLIGHT_PIN    GPIO_NUM_45
 #define DISPLAY_BACKLIGHT_OUTPUT_INVERT false
 
-// Portrait 240x320 (native orientation of the module)
-#define DISPLAY_WIDTH            240
-#define DISPLAY_HEIGHT           320
+// Landscape 320x240, MADCTL MV|MY (LCDWIKI rotation 3)
+#define DISPLAY_WIDTH            320
+#define DISPLAY_HEIGHT           240
 #define DISPLAY_MIRROR_X         false
-#define DISPLAY_MIRROR_Y         false
-#define DISPLAY_SWAP_XY          false
+#define DISPLAY_MIRROR_Y         true
+#define DISPLAY_SWAP_XY          true
 #define DISPLAY_INVERT_COLOR     true
 #define DISPLAY_RGB_ORDER        LCD_RGB_ELEMENT_ORDER_BGR
 #define DISPLAY_OFFSET_X         0

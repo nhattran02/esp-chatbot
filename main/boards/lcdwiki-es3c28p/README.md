@@ -12,6 +12,16 @@ Docs: https://www.lcdwiki.com/2.8inch_ESP32-S3_Display
 | Audio | ES8311 codec + FM8002E amplifier, on-board MEMS mic |
 | LED | WS2812B on IO42 |
 
+## Display
+
+The screen runs in landscape (320x240) with a board-specific chat UI
+(`jolly_chat_display.cc`) styled like Messenger / Instagram DMs: a header with
+the Jolly avatar, live status and status icons; purple-blue gradient bubbles for
+the user and gray bubbles for the assistant. The conversation opens with a
+profile card showing the [Jolly](https://gadgets.muse.ai/) mascot as ASCII art
+(UNSCII fonts, enabled in `config.json`). To rotate the picture by 180°, invert
+both `DISPLAY_MIRROR_X` and `DISPLAY_MIRROR_Y` in `config.h`.
+
 ## Controls
 
 - BOOT button / tap the screen: start or stop a conversation
