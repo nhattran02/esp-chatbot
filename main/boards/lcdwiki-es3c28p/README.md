@@ -7,20 +7,39 @@ Docs: https://www.lcdwiki.com/2.8inch_ESP32-S3_Display
 | Item | Value |
 |------|-------|
 | MCU | ESP32-S3 N16R8 (16 MB flash, 8 MB octal PSRAM) |
-| Display | 2.8" IPS 240x320, ILI9341V, 4-wire SPI |
+| Display | 2.8" IPS 320x240 (landscape), ILI9341V, 4-wire SPI |
 | Touch | FT6336G, I2C 0x38 (ES3C28P only) |
 | Audio | ES8311 codec + FM8002E amplifier, on-board MEMS mic |
 | LED | WS2812B on IO42 |
 
 ## Display
 
-The screen runs in landscape (320x240) with a board-specific chat UI
-(`jolly_chat_display.cc`) styled like Messenger / Instagram DMs: a header with
-the Jolly avatar, live status and status icons; purple-blue gradient bubbles for
-the user and gray bubbles for the assistant. The conversation opens with a
-profile card showing the [Jolly](https://gadgets.muse.ai/) mascot as ASCII art
-(UNSCII fonts, enabled in `config.json`). To rotate the picture by 180°, invert
-both `DISPLAY_MIRROR_X` and `DISPLAY_MIRROR_Y` in `config.h`.
+Landscape 320x240 "Sparkle Bot" UI (`sparkle_display.cc`), one page per device
+state:
+
+| Page | Device state |
+|------|--------------|
+| Clock + robot face | idle |
+| Listening (rings, sound wave, transcript) | listening |
+| Thinking (orbiting stars, quoted request) | connecting, listening after the transcript arrives, boot / activation / upgrade |
+| Speaking (talking face + chat bubbles) | speaking |
+| Wi-Fi setup (hotspot, URL, device code) | Wi-Fi configuration |
+
+Rendering notes:
+
+- Glows and blurs are pre-rendered A8 masks, tinted at draw time; translucent
+  fills are pre-blended to opaque colors. No LVGL shadow blur on moving parts.
+- Only the visible page animates; LVGL redraws just the changed rectangles.
+- Two 24-line DMA buffers let LVGL render while the previous strip is on SPI.
+- Fonts are Be Vietnam Pro and Baloo 2 (SIL OFL 1.1) with full Vietnamese
+  coverage; other characters fall back to the theme font from the assets.
+
+`sparkle_assets.c/.h` are generated; edit `tools/gen_sparkle_assets.py` and
+rerun it instead (it documents the font sources). The idle hint mentions
+"Xin chào": change `kIdleHint` if the configured wake word differs.
+
+To rotate the picture by 180°, invert both `DISPLAY_MIRROR_X` and
+`DISPLAY_MIRROR_Y` in `config.h`.
 
 ## Controls
 

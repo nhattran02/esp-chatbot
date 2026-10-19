@@ -7,7 +7,7 @@
 #include "button.h"
 #include "codecs/es8311_audio_codec.h"
 #include "config.h"
-#include "jolly_chat_display.h"
+#include "sparkle_display.h"
 #include "led/single_led.h"
 #include "mcp_server.h"
 #include "wifi_board.h"
@@ -92,7 +92,7 @@ private:
 class LCDWikiES3C28PBoard : public WifiBoard {
 private:
     Button boot_button_;
-    JollyChatDisplay* display_ = nullptr;
+    SparkleDisplay* display_ = nullptr;
     i2c_master_bus_handle_t i2c_bus_ = nullptr;
     Ft6336Touch touch_;
     AdcBatteryMonitor* battery_ = nullptr;
@@ -161,9 +161,8 @@ private:
         esp_lcd_panel_mirror(panel, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
         esp_lcd_panel_disp_on_off(panel, true);
 
-        display_ = new JollyChatDisplay(panel_io, panel, DISPLAY_WIDTH, DISPLAY_HEIGHT,
-                                        DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X,
-                                        DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+        display_ = new SparkleDisplay(panel_io, panel, DISPLAY_WIDTH, DISPLAY_HEIGHT,
+                                      DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
     }
 
     // Touch gestures: tap = start/stop conversation, hold 3 s = Wi-Fi setup
