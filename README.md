@@ -1,15 +1,14 @@
 # ESP Chatbot – Sparkle Bot
 
-Trợ lý giọng nói chạy trên **LCDWIKI ES3C28P** (ESP32-S3, màn 2.8" 320×240 nằm ngang),
-dựa trên firmware [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32).
+A voice assistant running on the **LCDWIKI ES3C28P** (ESP32-S3, 2.8-inch 320×240 landscape display), based on the [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) firmware.
 
-| Chờ | Đang nghe | Đang nghĩ |
+| Idle | Listening | Thinking |
 |:---:|:---:|:---:|
-| ![Chờ](docs/screenshots/idle.png) | ![Đang nghe](docs/screenshots/listening.png) | ![Đang nghĩ](docs/screenshots/thinking.png) |
+| ![Idle](docs/screenshots/idle.png) | ![Listening](docs/screenshots/listening.png) | ![Thinking](docs/screenshots/thinking.png) |
 
-| Trả lời | Kết nối Wi-Fi |
+| Speaking | Wi-Fi Setup |
 |:---:|:---:|
-| ![Trả lời](docs/screenshots/speaking.png) | ![Kết nối Wi-Fi](docs/screenshots/wifi-setup.png) |
+| ![Speaking](docs/screenshots/speaking.png) | ![Wi-Fi Setup](docs/screenshots/wifi-setup.png) |
 
 ## Build
 
@@ -18,8 +17,8 @@ docker run --rm -it -v "$PWD":/project -w /project -u $(id -u):$(id -g) -e HOME=
   espressif/idf:release-v6.1 python scripts/build.py lcdwiki-es3c28p --language vi-VN
 ```
 
-Chi tiết phần cứng và giao diện: [main/boards/lcdwiki-es3c28p](main/boards/lcdwiki-es3c28p/README.md).
+For hardware details and UI documentation, see [main/boards/lcdwiki-es3c28p](main/boards/lcdwiki-es3c28p/README.md).
 
-## Giấy phép
+## License
 
-MIT, giữ nguyên từ dự án gốc – xem [LICENSE](LICENSE).
+MIT, inherited from the original project. See [LICENSE](LICENSE).
